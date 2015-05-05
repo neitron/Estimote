@@ -4,12 +4,19 @@ import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.bluetooth.BluetoothAdapter;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Environment;
+import android.os.PowerManager;
 import android.os.RemoteException;
 
 import android.support.v7.app.ActionBarActivity;
@@ -28,11 +35,14 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -54,10 +64,14 @@ public class MainActivity extends ActionBarActivity {
 
     private int estimotesCountInRegion = 0;
 
+    DB dbHelper;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        dbHelper = new DB(this, "estimote", null, 1);
 
         notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 
@@ -79,9 +93,7 @@ public class MainActivity extends ActionBarActivity {
             }
 
             @Override
-            public void onExitedRegion(Region region) {
-                //Log.d("Qwer", "EXITED");
-
+            public void onExitedRegion(Region region){
                 if(--estimotesCountInRegion == 0) {
                     postNotification("Exited region", null);
                 }
@@ -164,7 +176,7 @@ public class MainActivity extends ActionBarActivity {
             Notification notification = new Notification.Builder(MainActivity.this)
                     .setSmallIcon(R.mipmap.ic_launcher)
                     .setLargeIcon(ico)
-                    .setContentTitle("Estimote for shops")
+                    .setContentTitle("Estimote")
                     .setContentText(msg)
                     .setAutoCancel(true)
                     .setContentIntent(pendingIntent)
@@ -198,7 +210,7 @@ public class MainActivity extends ActionBarActivity {
         //statusTextView.setText(msg);
     }
 
-    private class GetData extends AsyncTask<Beacon, Beacon, String[]> {
+    private class GetData extends AsyncTask<Beacon, Beacon, List<String>> {
         Bitmap firstBitmap;
 
         @Override
@@ -215,24 +227,123 @@ public class MainActivity extends ActionBarActivity {
         }
 
         @Override
-        protected void onPostExecute(String[] str) {
-            ImageView im = (ImageView) findViewById(R.id.imageView);
-            im.setImageBitmap(firstBitmap);
+        protected void onPostExecute(List<String> str) {
+
+            ConnectivityManager cm = (ConnectivityManager) getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkInfo nf = cm.getActiveNetworkInfo();
+
+            ContentValues cv = new ContentValues();
+
+            SQLiteDatabase db = dbHelper.getWritableDatabase();
 
             TextView mes = (TextView) findViewById(R.id.mes);
             TextView url = (TextView) findViewById(R.id.url);
+            ImageView im = (ImageView) findViewById(R.id.imageView);
 
-            mes.setText(str[0]);
-            url.setText("Shop`s site: " + str[1]);
+            if(nf != null && nf.isConnected()) {
+                Log.d("db", "CONNECTED");
 
-            Log.d("postNotification();  ", "postNotification();");
-            postNotification(str[0], firstBitmap);
+                int clearCount = db.delete("beacon", "beacon_major = " + str.get(4), null);
+                Log.d("db", "clear count = " + clearCount);
+
+                cv.put("beacon_major", Integer.parseInt(str.get(4)));
+                cv.put("hello_msg", str.get(0));
+                cv.put("bye_msg", str.get(2));
+                cv.put("image_url", str.get(1));
+                cv.put("site_url", str.get(3));
+
+                long id = db.insert("beacon", null, cv);
+                Log.d("db", "insert id = " + id);
+                Log.d("im",firstBitmap.toString());
+                im.setImageBitmap(firstBitmap);
+
+                File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), str.get(4) + ".png");
+
+                try {
+                    FileOutputStream fos = null;
+                    try {
+                        fos = new FileOutputStream(file);
+                        boolean b = firstBitmap.compress(Bitmap.CompressFormat.JPEG, 100, fos);
+                        Log.d("image", "" + b);
+                    } finally {
+                        if (fos != null) fos.close();
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                mes.setText(str.get(0));
+                url.setText("Shop`s site: " + str.get(1));
+
+
+                if (getResources().getDisplayMetrics().densityDpi < 600) {
+                    postNotification(str.get(0), firstBitmap);
+                } else {
+
+                    startActivity(
+                            new Intent(Intent.ACTION_VIEW, Uri.parse(str.get(1)))
+                    );
+                }
+            }
+            else
+            {
+                Log.d("db", "NOT CONNECTED id = " + str.get(0));
+
+                // делаем запрос всех данных из таблицы mytable, получаем Cursor
+                Cursor c = db.query("beacon", null, "beacon_major = ?", new String[]{str.get(0)}, null, null, null);
+                //Cursor c = db.query("beacon", null, null, null, null, null, null);
+
+                // ставим позицию курсора на первую строку выборки
+                // если в выборке нет строк, вернется false
+                if (c.moveToFirst()) {
+
+                    // определяем номера столбцов по имени в выборке
+                    //int bm = c.getColumnIndex("beacon_major");
+                    int hmsg = c.getColumnIndex("hello_msg");
+                    //int bmsg = c.getColumnIndex("bye_msg");
+                    int iurl = c.getColumnIndex("image_url");
+                    int surl = c.getColumnIndex("site_url");
+
+                    File file = new File(Environment.
+                            getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), str.get(0) + ".png");
+                    firstBitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
+
+                    Log.d("log", String.format("bitmap size = %sx%s, byteCount = %s",
+                            firstBitmap.getWidth(), firstBitmap.getHeight(),
+                            (int) (firstBitmap.getByteCount() / 1024)));
+
+
+                    im.setImageBitmap(firstBitmap);
+
+                    mes.setText(c.getString(hmsg));
+                    url.setText("Shop`s site: " + c.getString(surl));
+
+                    if (getResources().getDisplayMetrics().densityDpi < 600) {
+                        postNotification(c.getString(hmsg), firstBitmap);
+                    } else {
+
+                        startActivity(
+                                new Intent(Intent.ACTION_VIEW, Uri.parse(c.getString(surl)))
+                        );
+                    }
+
+                } else
+                    Log.d("db", "0 rows");
+                c.close();
+
+            }
+
+            dbHelper.close();
         }
 
         @Override
-        protected String[] doInBackground(Beacon... params) {
+        protected List<String> doInBackground(Beacon... params) {
+
+            List <String> str = new ArrayList<>();
 
             Beacon beacon = params[0];
+
+            str.add("" + beacon.getMajor());
 
             publishProgress(beacon);
 
@@ -297,9 +408,10 @@ public class MainActivity extends ActionBarActivity {
                 String hello_mes;
                 String bye_mes;
 
-                String[] str = new String[2];
+
 
                 try {
+
                     JSONObject json = new JSONObject(result);
                     imageUrl = json.getString("image");
                     shop_url = json.getString("shop_url");
@@ -310,8 +422,14 @@ public class MainActivity extends ActionBarActivity {
 
                     Log.d("info", "\n" + shop_url + '\n' + hello_mes + '\n' + bye_mes + '\n');
 
-                    str[0] = hello_mes;
-                    str[1] = shop_url;
+                    str.clear();
+
+                    str.add(hello_mes);
+                    str.add(imageUrl);
+                    str.add(bye_mes);
+                    str.add(shop_url);
+                    str.add(""+beacon.getMajor());
+
 
                 } catch (JSONException e) {
                     Log.e("", e.getMessage(), e);
@@ -336,8 +454,9 @@ public class MainActivity extends ActionBarActivity {
                     }
                 }
             }
-
-            return null;
+            str.clear();
+            str.add(""+beacon.getMajor());
+            return str;
         }
 //            // далее мы должны отправлять запрос на апи сервер с параметрами бикона, и получать джейсон ответ для одного бикона
 //            // заглушка
